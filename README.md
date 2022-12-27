@@ -1,4 +1,5 @@
 # Grow-Box-for-exotic-plants-with-Environment-controller.
+# YouTube video describing build:https://youtu.be/-emSU4Sam-o
 # This project I built for a friend of mine called Tomas, he loves growing exotic plants and wanted a controlled environment to do this but could not afford the high prices (£100's) of a commercially build item.
 # This project is a very simple build using easy to obtain items.
 # List of parts
