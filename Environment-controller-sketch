@@ -1,0 +1,401 @@
+/*
+  Bio environment controller for plants.
+  LCD Display 1602 with a 4 Button keypad.
+  RTC real time cloak 3231.
+  relay bank to control a fan heater and lights.
+  menu screens to set clock time and parameters for heating, fan and lights.
+  plus a temprature and humidity sensor DHT22.
+  code written by Susan Amber Bruce 05/10/2021. 
+*/
+#include "DHT.h" // library for temprature humidity sensor.
+#define DHTPIN 6 // digital pin 6 for reading DHT22 temprature humidity sensor.
+#define DHTTYPE DHT22 // type of sensor being used.
+DHT dht(DHTPIN, DHTTYPE); // create temprature humidity sensor object.
+#include <LiquidCrystal_I2C.h> // liquid crystal library.
+LiquidCrystal_I2C lcd(0x27, 16, 2); // create LCD object at I2C address 0x27, 16 column and 2 rows.
+#include <DS3231.h> // Real Time Clock module  // web: http://www.RinkyDinkElectronics.com/.
+DS3231 rtc(SDA, SCL); // create RTC object.
+Time t;
+//RTC setting variables.
+int tick = 0;
+int Hour = 12;
+int Min = 59;
+int Day = 15;
+int Month = 6;
+int Year = 2021;
+// paramerter variables.
+float hysterisis = 1.5;
+float NowTemp = 0;
+float NowHum = 0;
+int HeaterTemp = 20;
+int FanStartTime = 8;
+int FanStopTime = 9;
+int FanStartHum = 50;
+int HumidityMargin = 10;
+int LightStartTime = 8;
+int LightStopTime = 9;
+// Input & output arrays & Button Logic.
+const int numOfInputs = 4; // define number of inputs.
+const int numOfOutputs = 3; // define number of outputs.
+const int inputPins[numOfInputs] = {7, 8, 9, 10}; // define input pins used for 4 button keypad.
+const int outputPins[numOfOutputs] = {2, 3, 4}; // define output pins used for powering 3 Relays [Lights(pin 2) Heater(pin 3) Fan(pin 4)].
+int inputState[numOfInputs] = {LOW,LOW,LOW,LOW}; // initialise the state of inputs array to LOW.
+int lastInputState[numOfInputs] = {LOW,LOW,LOW,LOW}; // initialise last state of inputs array to LOW.
+boolean inputFlags[numOfInputs] = {false, false, false, false}; // initialise flag state of inputs array to false.
+int outputFlags[numOfOutputs] = {HIGH, HIGH, HIGH}; // initialise flag state for outputs array to false.
+boolean screenFlag = false;
+unsigned long lastDebounceTime[numOfInputs] = {0,0,0,0}; // initialise last debounce time array with zero.
+unsigned long debounceDelay = 90; // set debounce time delay.
+//LCD Menu Logic
+// *******************************************************************************************************
+const int numOfScreens = 12; // screensB for setting heater, fan, lights, action temprature & humidity.
+int currentScreen = 0;
+int parameters[numOfScreens];
+String screens[numOfScreens][2] = {
+{"Heater Temp", "Temprature C"},
+{"Fan StartTime", "Hour"}, {"Fan StopTime", "Hour"}, {"Fan StartHumidity", "Humidity %"}, {"Humidity", "Margin +/- %"},
+{"Lights StartTime", "Hour"}, {"Lights StopTime", "Hour"},
+{"Set Time Hour", "Hours"}, {"Set Time Min", "Mins"}, 
+{"Set Date Day", "Day"}, {"Set Date Month", "Month"}, {"Set Date Year", "Year"}, 
+};
+// ******************************************************************************************************
+unsigned long interval = 500; //this defines the interval for each task in milliseconds
+unsigned long last = 0; //this records the last executed time for each task
+void setup() {
+  Serial.begin(9600); // start serial for serial ouput and debuugging (this line and all lines starting with Serial.print can be deleted if not needed).
+  // start temprature & humidity sensor.
+  dht.begin();
+  NowTemp = dht.readTemperature();
+  NowHum = dht.readHumidity();
+  // Setup the LCD display
+  lcd.init(); // initialize the lcd
+  lcd.backlight();            
+  lcd.setCursor(0,0); // Set cursor to top line first position.
+  // start Real Time Clock.
+  rtc.begin();
+  t = rtc.getTime();
+  Hour = t.hour;
+  parameters[7] = Hour;
+  Min = t.min;
+  parameters[8] = Min;
+  Day = t.date;
+  parameters[9] = Day;
+  Month = t.mon;
+  parameters[10] = Month;
+  Year = t.year;
+  parameters[11] = Year;
+  // pre set other parameters.
+  parameters[0] = HeaterTemp;
+  parameters[1] = FanStartTime;
+  parameters[2] = FanStopTime;
+  parameters[3] = FanStartHum;
+  parameters[4] = HumidityMargin;
+  parameters[5] = LightStartTime;
+  parameters[6] = LightStopTime;
+  // set up input pins for buttons.
+  for(int i = 0; i < numOfInputs; i++){
+    pinMode(inputPins[i], INPUT);
+    digitalWrite(inputPins[i], HIGH); // initialise input pins with pull-up 20k internal resistor.
+  }
+  // set up output pins for relays and turn off.
+  for(int i = 0; i < numOfOutputs; i++){
+    pinMode(outputPins[i], OUTPUT);
+    digitalWrite(outputPins[i], outputFlags[i]);
+  }
+}
+//########################################################################################################################
+void loop() {
+  
+  setInputFlags();
+  resolveInputFlags();
+  setOutputFlags();
+  powerOutputs();
+  unsigned long now = millis();
+  if(now - last >= interval){last = now; displayScreen();}
+  //do other things here
+  
+}
+void displayScreen(){
+  tick++;
+  if(tick == 41 && screenFlag == false){tick = 0;}
+  if(tick == 41 && screenFlag == true){
+    currentScreen = 0;
+    screenFlag = false;
+    tick = 0;}
+  if(tick <= 11 && screenFlag == false){printTime();}
+  else if(tick <= 11 && screenFlag == true){printScreen();}
+  if(tick >= 12 && tick <= 40 && screenFlag == false){printHum();}
+  else if(tick >= 12 && tick <= 40 && screenFlag == true){printScreen();}
+}
+void setInputFlags(){
+  for(int i = 0; i < numOfInputs; i++){ // iterate through the buttons on keypad and read them.
+    int reading = digitalRead(inputPins[i]); // read input pin value.
+    if (reading != lastInputState[i]){ // check if reading has changed from last reading.
+      lastDebounceTime[i] = millis(); // take a time stamp.
+    }
+    if ((millis() - lastDebounceTime[i]) > debounceDelay){ // use time stamp to delay setting input flag until all switch echos are debounced.
+      if (reading != inputState[i]){ // if reading is different than what is recorded in input state array,
+        inputState[i] = reading; // set input state array to value of input reading.
+        if (inputState[i] == LOW){ // if after debouncing a button has been pressed,
+          inputFlags[i] = true; // set a input reading true flag.
+        }
+      }
+    }
+    lastInputState[i] = reading;  // save in array last reading before leaving the loop.
+  }
+}
+void resolveInputFlags(){ // read state of input flags and branch to input action if true.
+  for(int i = 0; i < numOfInputs; i++){ // iterate through input flags.
+    if(inputFlags[i] == true){ // if input flag set to true,
+      inputAction(i); // branch to input action function.
+//      Serial.print("true input = ");
+//      Serial.println(i);
+      inputFlags[i] = false; // reset input flag to false.
+    }
+  }
+}
+void inputAction(int input){
+  if(input == 0){
+    tick = 0;
+    screenFlag = true;
+    if (currentScreen == 0){
+      currentScreen = numOfScreens-1;
+    }else{
+      currentScreen--;
+    }
+  }else if(input == 1){
+    tick = 0;
+    screenFlag = true;
+    if (currentScreen == numOfScreens-1) {
+      currentScreen = 0;
+    }else{
+      currentScreen++;
+    }
+  }else if(input == 2){
+    tick = 0;
+    screenFlag = true;
+    parameterChange(0);
+  }else if(input == 3){
+    tick = 0;
+    screenFlag = true;
+    parameterChange(1);
+  }
+}
+void parameterChange(int key){
+  if(key == 0){
+    switch(currentScreen){
+      case 0:
+      parameters[currentScreen]++; // Heater Temp
+      if(parameters[currentScreen] > 45){
+        parameters[currentScreen] = 10;}
+      HeaterTemp = parameters[currentScreen];
+      break;
+      case 1:
+      parameters[currentScreen]++; // Fan StartTime
+      if(parameters[currentScreen] > 23){
+        parameters[currentScreen] = 0;}
+      FanStartTime = parameters[currentScreen];
+      break;
+      case 2:
+      parameters[currentScreen] ++; // Fan StopTime
+      if(parameters[currentScreen] > 23){
+        parameters[currentScreen] = 0;}
+      FanStopTime = parameters[currentScreen]; 
+      break;
+      case 3:
+      parameters[currentScreen]++; // Fan StartHum
+      if(parameters[currentScreen] > 99){
+        parameters[currentScreen] = 1;}
+      FanStartHum = parameters[currentScreen];
+      break;
+      case 4:
+      parameters[currentScreen]++; // Humidity Margin
+      if(parameters[currentScreen] > 30){
+        parameters[currentScreen] = 1;}
+      HumidityMargin = parameters[currentScreen];
+      break;
+      case 5:
+      parameters[currentScreen]++; // Lights StartTime
+      if(parameters[currentScreen] > 23){
+        parameters[currentScreen] = 0;}
+      LightStartTime = parameters[currentScreen];
+      break;
+      case 6:
+      parameters[currentScreen] ++; // Lights StopTime
+      if(parameters[currentScreen] > 23){
+        parameters[currentScreen] = 0;}
+      LightStopTime = parameters[currentScreen]; 
+      break;
+      case 7:
+      parameters[currentScreen]++; // Set Time Hour
+      if(parameters[currentScreen] > 23){
+        parameters[currentScreen] = 0;}
+      Hour = parameters[currentScreen];
+      rtc.setTime(Hour, Min, 0);     // Set the time (24hr format)
+      break;
+      case 8:
+      parameters[currentScreen]++; // Set the Min
+      if(parameters[currentScreen] > 59){
+        parameters[currentScreen] = 0;}
+      Min = parameters[currentScreen];
+      rtc.setTime(Hour, Min, 0);     // Set the time (24hr format)
+      break;
+      case 9:
+      parameters[currentScreen]++; // Set Date Day
+      if(parameters[currentScreen] > 31){
+        parameters[currentScreen] = 1;}
+      Day = parameters[currentScreen];
+      rtc.setDate(Day, Month, Year); // Set the date
+      break;
+      case 10:
+      parameters[currentScreen]++; // Set the Month
+      if(parameters[currentScreen] > 12){
+        parameters[currentScreen] = 1;}
+      Month = parameters[currentScreen];
+      rtc.setDate(Day, Month, Year);
+      break;
+      case 11:
+      parameters[currentScreen]++; // Set the Year
+      if(parameters[currentScreen] > 2099){
+        parameters[currentScreen] = 2021;}
+      Year = parameters[currentScreen];
+      rtc.setDate(Day, Month, Year);
+      break;}
+    }else if(key == 1){
+      switch(currentScreen){
+        case 0:
+        parameters[currentScreen]--; // Heater Temp
+        if(parameters[currentScreen] < 10){
+          parameters[currentScreen] = 45;}
+        HeaterTemp = parameters[currentScreen];
+        break;
+        case 1:
+        parameters[currentScreen]--; // Fan StartTime
+        if(parameters[currentScreen] < 0){
+          parameters[currentScreen] = 23;}
+        FanStartTime = parameters[currentScreen];
+        break;
+        case 2:
+        parameters[currentScreen] --; // Fan StopTime
+        if(parameters[currentScreen] < 0){
+          parameters[currentScreen] = 23;}
+        FanStopTime = parameters[currentScreen];
+        break;
+        case 3:
+        parameters[currentScreen]--; // Fan StartHum
+        if(parameters[currentScreen] < 1){
+          parameters[currentScreen] = 99;}
+        FanStartHum = parameters[currentScreen];
+        break;
+        case 4:
+        parameters[currentScreen]--; // Humidity Margin
+        if(parameters[currentScreen] < 1){
+          parameters[currentScreen] = 30;}
+        HumidityMargin = parameters[currentScreen];
+        break;
+        case 5:
+        parameters[currentScreen]--; // Lights StartTime
+        if(parameters[currentScreen] < 0){
+          parameters[currentScreen] = 23;}
+        LightStartTime = parameters[currentScreen];
+        break;
+        case 6:
+        parameters[currentScreen] --; // Lights StopTime
+        if(parameters[currentScreen] < 0){
+          parameters[currentScreen] = 23;}
+        LightStopTime = parameters[currentScreen];
+        break;
+        case 7:
+        parameters[currentScreen]--;
+        if(parameters[currentScreen] < 0){
+        parameters[currentScreen] = 23;}
+        Hour = parameters[currentScreen];
+        rtc.setTime(Hour, Min, 0);     // Set the time (24hr format)
+        break;
+        case 8:
+        parameters[currentScreen]--;
+        if(parameters[currentScreen] < 0){
+        parameters[currentScreen] = 59;}
+        Min = parameters[currentScreen];
+        rtc.setTime(Hour, Min, 0);     // Set the time (24hr format)
+        break;
+        case 9:
+        parameters[currentScreen]--;
+        if(parameters[currentScreen] < 1){
+        parameters[currentScreen] = 31;}
+        Day = parameters[currentScreen];
+        rtc.setDate(Day, Month, Year); // Set the date
+        break;
+        case 10:
+        parameters[currentScreen]--;
+        if(parameters[currentScreen] < 1){
+        parameters[currentScreen] = 12;}
+        Month = parameters[currentScreen];
+        rtc.setDate(Day, Month, Year);
+        break;
+        case 11:
+        parameters[currentScreen]--;
+        if(parameters[currentScreen] < 2021){
+        parameters[currentScreen] = 2021;}
+        Year = parameters[currentScreen];
+        rtc.setDate(Day, Month, Year);
+        break;}  
+    }
+}
+void setOutputFlags(){
+  t = rtc.getTime();
+  Hour = t.hour;
+    // set light relay
+  if(LightStartTime <= Hour && Hour < LightStopTime){
+    outputFlags[0] = LOW;} // turn on light
+    else{outputFlags[0] = HIGH;} // turn off light
+  // set heater relay flag
+  if(NowTemp < (HeaterTemp - hysterisis)){outputFlags[1] = LOW;} // turn on heater
+     else if(NowTemp > (HeaterTemp + hysterisis)){outputFlags[1] = HIGH;} // turn off heater
+  if(FanStartTime <= Hour && Hour < FanStopTime){outputFlags[2] = LOW;} // turn on fan
+  else if(NowHum < (FanStartHum - HumidityMargin)){outputFlags[2] = LOW;} // turn on fan
+  else if(NowHum > (FanStartHum + HumidityMargin)){outputFlags[2] = HIGH;} // turn off fan
+  else{outputFlags[2] = HIGH;} // turn off fan
+}
+void powerOutputs(){ // read output array value and power LED's to value.
+  for(int i = 0; i < numOfOutputs; i++){
+    digitalWrite(outputPins[i], outputFlags[i]);
+  }   
+}
+void printScreen(){
+  lcd.clear();
+  lcd.print(screens[currentScreen][0]);
+  lcd.setCursor(0,1);
+  lcd.print(parameters[currentScreen]);
+  lcd.print(" ");
+  lcd.print(screens[currentScreen][1]);
+}
+void printTime(){
+  lcd.clear();
+  lcd.setCursor(0, 0); // move cursor to   (0, 0)
+  lcd.print("TIME");   // print message at (0, 0)
+  lcd.setCursor(5, 0); // move cursor to   (5, 0) fifth character line zero
+  lcd.print(rtc.getTimeStr());        // print message at (5, 0) fifth character line zero
+  // send Day and Date
+  lcd.setCursor(0, 1);         // move cursor to   (0, 1)
+  lcd.print("DATE"); // print message at (0, 1) zero charater line one
+  lcd.setCursor(5, 1);         // move cursor to   (5, 1)fifth character line one
+  lcd.print(rtc.getDateStr()); // print message at (5, 1)fifth character line one
+}
+void printHum(){
+  NowTemp = dht.readTemperature();
+  NowHum = dht.readHumidity();
+  lcd.clear();
+  lcd.setCursor(0, 0); // move cursor to   (0, 0)
+  lcd.print("TEMP");   // print message at (0, 0));
+  lcd.setCursor(5, 0);
+  lcd.print(NowTemp);
+  lcd.setCursor(11, 0);
+  lcd.print("C");
+  lcd.setCursor(0, 1);
+  lcd.print("HUMIDITY ");
+  lcd.setCursor(9, 1);
+  lcd.print(NowHum);
+  lcd.setCursor(14, 1);
+  lcd.print("%");
+}
